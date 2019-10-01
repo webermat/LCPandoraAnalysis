@@ -11,11 +11,13 @@
 #include "TChain.h"
 #include "TFile.h"
 #include "TH1F.h"
+#include "TH2F.h"
 #include "TGraph.h"
 #include "TProfile.h"
 #include "TLegend.h"
 #include "TSystem.h"
 #include "TTree.h"
+#include "TMatrixF.h"
 #include "TStyle.h"
 
 #include "Math/Minimizer.h"
@@ -65,6 +67,10 @@ public:
 public:
     int            m_firstPseudoLayer;        ///< Pseudolayer at the IP
     float          m_trueEnergy;              ///< The true (mc or beam) kaon0L energy (unit GeV)
+    float          m_EnergyOfPfo;             ///< reconstructed energy of leading Pfo (unit GeV)
+    float          m_EnergyOfAllPfos;         ///< energy sum of all reconstructed Pfos (unit GeV)
+    int            m_nAllPfos;                ///< number of reconstructed Pfos
+    float          m_CosThetaOfPfo;           ///< cosTheta of leading Pfo (leading in energy)
     float          m_reconstructedEnergy;     ///< The kaon0L reconstructed energy (unit GeV)
     float          m_eCalEnergy;              ///< Sum of the kaon0L ecal hit energies
     FloatVector    m_hCalBinEnergies;         ///< HCal hit energies
@@ -85,7 +91,7 @@ typedef std::vector<Event>       EventVector;
 class SoftwareCompensation
 {
 public:
-  /**
+   /**
    *  @brief  Constructor
    */
     SoftwareCompensation();
@@ -179,7 +185,7 @@ public:
      */
     template <typename T>
     TCanvas *DrawPlots(const std::vector<T*> &plots, TLegend *pTLegend, const std::string &canvasTitle, const std::string &xTitle) const;
-
+    TCanvas *DrawPlots2D(TH2F* hist, const std::string &canvasTitle, const std::string &xTitle) const;
 
     // Inputs Set By Parsing Command Line
     std::string                  m_filePattern;                ///< The global file pattern for reading input data (root file) - Kaon0L
@@ -189,6 +195,10 @@ public:
     std::string                  m_treeName;                   ///< The root tree name
 
     int                          m_firstPseudoLayer;           ///< Pseudolayers at the IP
+    float                        m_EnergyOfPfo;             ///< reconstructed energy of leading Pfo (unit GeV)
+    float                        m_EnergyOfAllPfos;         ///< energy sum of all reconstructed Pfos (unit GeV)
+    int                          m_nAllPfos;                ///< number of reconstructed Pfos
+    float                        m_CosThetaOfPfo;           ///< cosTheta of leading Pfo (leading in energy)
     FloatVector                  m_densityBinEdges;            ///< List of energy bin edges (size N)
     FloatVector                  m_densityBins;                ///< List of energy bins (size N-1)
     int                          m_nMinuitParameters;          ///< The number of minuit parameters (9)
@@ -253,12 +263,18 @@ private:
     float           m_minCleanHitEnergyFraction;  ///< Min fraction of cluster energy represented by hit to consider cleaning
     float           m_minCleanCorrectedHitEnergy; ///< Min value of new hit hadronic energy estimate after cleaning
 
+    TMatrixF*       m_covMatrix;              ///< covariance matrix entries of software compensation parameters
+    TMatrixF*       m_corrMatrix;             ///< covariance matrix entries of software compensation parameters
+
     TGraph         *m_gChi2Evolution;         ///< The chi2 evolution graph
     TH1FVector      m_hECalEnergyVector;      ///< The list of ECal total hit energy plots (1 per true energy)
     TProfileVector  m_hHCalEnergyVector;      ///< The list of HCal hit energy sum plots (1 per true energy)
     TH1FVector      m_hHCalHitEnergyVector;   ///< The list of HCal hit energy plots (1 per true energy)
     TH1FVector      m_hTotalEnergyVector;     ///< The list of total pfo energy plots (1 per true energy)
     TH1FVector      m_hSoftCompEnergyVector;  ///< The list of software compensated energy plots (1 per true energy)
+
+    TH2F*            m_hSoftCompParamsCovMatrix;  ///< Covariance Matrix of the software compensation parameters
+    TH2F*            m_hSoftCompParamsCorrMatrix;  ///< Correlation Matrix of the software compensation parameters
 
     SoftwareCompensation(const SoftwareCompensation &) = delete;
     SoftwareCompensation &operator=(const SoftwareCompensation &) = delete;
@@ -343,6 +359,10 @@ int main(int argc, char **argv)
 
 Event::Event(const SoftwareCompensation &softwareCompensation) :
     m_firstPseudoLayer(0),
+    m_EnergyOfPfo(softwareCompensation.m_EnergyOfPfo),   
+    m_EnergyOfAllPfos(softwareCompensation.m_EnergyOfAllPfos),
+    m_nAllPfos(softwareCompensation.m_nAllPfos),
+    m_CosThetaOfPfo(softwareCompensation.m_CosThetaOfPfo),
     m_trueEnergy(softwareCompensation.m_trueEnergy),
     m_reconstructedEnergy(softwareCompensation.m_rawClusterEnergy),
     m_eCalEnergy(0.f),
@@ -410,6 +430,10 @@ SoftwareCompensation::SoftwareCompensation() :
     m_eventVector(),
     m_pTChain(NULL),
     m_rawClusterEnergy(0.f),
+    m_EnergyOfPfo(0.f),
+    m_EnergyOfAllPfos(0.f),
+    m_nAllPfos(0),
+    m_CosThetaOfPfo(0.f),
     m_hitEnergies(NULL),
     m_cellSize0(NULL),
     m_cellSize1(NULL),
@@ -421,14 +445,18 @@ SoftwareCompensation::SoftwareCompensation() :
     m_minCleanHitEnergy(0.5f),
     m_minCleanHitEnergyFraction(0.01f),
     m_minCleanCorrectedHitEnergy(0.1f),
+    m_covMatrix(NULL),
+    m_corrMatrix(NULL),
     m_gChi2Evolution(NULL),
     m_hECalEnergyVector(),
     m_hHCalEnergyVector(),
     m_hHCalHitEnergyVector(),
     m_hTotalEnergyVector(),
-    m_hSoftCompEnergyVector()
+    m_hSoftCompEnergyVector(),
+    m_hSoftCompParamsCovMatrix(NULL),
+    m_hSoftCompParamsCorrMatrix(NULL)
 {
-    m_densityBinEdges = {0,  2.,  5., 7.5, 9.5,  13., 16.,  20., 23.5,  28., 1e6};
+    m_densityBinEdges = {0,  2.,  5., 7.5, 9.5,  13., 16.,  20., 23.5,  28.,  33.,  40. ,50., 75., 100., 1e6};
     m_densityBins.resize(m_densityBinEdges.size()-1);
     m_softCompGuessParameters = {2.4, -0.06, 0.0008, -0.09, -0.004, -0.00008, 0.05, 0.07, -0.1};
     m_nMinuitParameters = m_softCompGuessParameters.size();
@@ -436,7 +464,10 @@ SoftwareCompensation::SoftwareCompensation() :
 
     for (unsigned int i = 0 ; i<m_densityBinEdges.size()-1 ; i++)
     {
-        m_densityBins[i] = (i == m_densityBinEdges.size()-2) ? 30 : (m_densityBinEdges[i] + m_densityBinEdges[i+1])/2.f;
+        m_densityBins[i] = (i == m_densityBinEdges.size()-2) ? 110 : (m_densityBinEdges[i] + m_densityBinEdges[i+1])/2.f;
+    }
+    for (unsigned int i = 0 ; i<m_densityBins.size() ; i++){
+      std::cout<<"density bins "<<i<<" "<<m_densityBins[i]<<std::endl;
     }
 }
 
@@ -473,8 +504,21 @@ int SoftwareCompensation::GetNDensityBins() const
 
 bool SoftwareCompensation::SkipCurrentEvent() const
 {
-    if(m_hitEnergies->empty())
-        return true;
+  //float cut_E_lead_over_E_tot=0.99;
+  //if((m_EnergyOfPfo/m_EnergyOfAllPfos)<cut_E_lead_over_E_tot){
+     //std::cout<<"skip event with e ratio "<<m_EnergyOfPfo/m_EnergyOfAllPfos<<std::endl;
+  // return true;  
+  //}
+  if(m_nAllPfos!=1)
+    return true;
+
+  //if(fabs(m_CosThetaOfPfo)>0.92 || fabs(m_CosThetaOfPfo)<0.85){
+    //std::cout<<"skip event with "<<m_CosThetaOfPfo<<std::endl;
+    //return true;
+  //}
+
+   if(m_hitEnergies->empty())
+     return true;
 
     const bool invalidSingleParticle(m_rawClusterEnergy <= 0);
 
@@ -575,6 +619,7 @@ void SoftwareCompensation::PerformMinimization()
 
     ROOT::Math::Functor minimizerFunctor(this, &SoftwareCompensation::MinuitChi2, m_nMinuitParameters);
     pMinimizer->SetFunction(minimizerFunctor);
+    pMinimizer->SetValidError(true);
 
     for (unsigned int i = 0 ; i < m_nMinuitParameters ; i++)
     {
@@ -586,6 +631,39 @@ void SoftwareCompensation::PerformMinimization()
     pMinimizer->Minimize();
     const double *finalParameters(pMinimizer->X());
     std::cout << "Reached minimum with Chi2 : " << pMinimizer->MinValue() << std::endl;
+    pMinimizer->Hesse();
+    if(pMinimizer->IsValidError()){
+      const double * errors = 0;
+      errors=pMinimizer->Errors();
+      for(unsigned int i=0;i<m_softCompGuessParameters.size();i++){
+	std::cout<<"valid error in minimizer "<<i<<" "<<errors[i]<<std::endl;
+	//double errLow=-1;
+	//double errUp=-1;
+	//pMinimizer->GetMinosError(i,errLow,errUp);
+	//std::cout<<"minos errors low up "<<errLow<<"/"<<errUp<<std::endl;
+      }
+    }else{
+      std::cout<<"no valid error in minimizer"<<std::endl;
+    }
+
+    if(pMinimizer->ProvidesError() && (pMinimizer->CovMatrixStatus()!=-1)){
+      std::cout<<"covMatrixStatus "<<pMinimizer->CovMatrixStatus()<<" "<<m_nMinuitParameters<<std::endl;
+      if(m_covMatrix==NULL){
+	std::cout<<"NULL matrix so far"<<std::endl;
+      }
+      m_covMatrix = new TMatrixF(m_nMinuitParameters,m_nMinuitParameters);
+      m_corrMatrix = new TMatrixF(m_nMinuitParameters,m_nMinuitParameters);
+      std::cout<<"corr matrixs and cov matrix dimensions "<<m_covMatrix->GetNcols()<<"/"<<m_covMatrix->GetNrows()<<" corr "<<m_corrMatrix->GetNcols()<<"/"<<m_corrMatrix->GetNrows()<<" check "<<m_nMinuitParameters<<std::endl;
+      for(unsigned int par0=0;par0<m_nMinuitParameters;par0++){
+	std::cout<<"now in value "<<par0<<"/"<<par0<<" "<<(*m_covMatrix)(par0,par0)<<" "<< (*m_corrMatrix)(par0,par0)<<std::endl;
+	for(unsigned int par1=0;par1<m_nMinuitParameters;par1++){
+	  std::cout<<"now in value "<<par0<<"/"<<par1<<std::endl;
+	  (*m_covMatrix)(par0,par1)=pMinimizer->CovMatrix(par0,par1);
+	  (*m_corrMatrix)(par0,par1)=pMinimizer->Correlation(par0,par1);
+	  std::cout<<"cov/corr Matrix["<<par0<<"]["<<par1<<"] "<<(*m_covMatrix)(par0,par1)<<"/"<<(*m_corrMatrix)(par0,par1)<<"/"<<pMinimizer->CovMatrix(par0,par1)<<"/"<<pMinimizer->Correlation(par0,par1)<<std::endl;
+	}
+      }
+    } 
 
     for (unsigned int i = 0 ; i < m_nMinuitParameters ; i++)
     {
@@ -611,10 +689,10 @@ void SoftwareCompensation::CreateHistograms()
         std::stringstream ss(energyStr);
         std::string hName, hTitle;
         const int nDensityBins(this->GetNDensityBins());
-
+	//change limits here to accomodate new tuning
         hName = "ECalEnergy" + energyStr + "GeV";
         hTitle = "ECal energy";
-        TH1F *pECalEnergyHistogram = new TH1F(hName.c_str(), hTitle.c_str(), 500, 0, 100);
+        TH1F *pECalEnergyHistogram = new TH1F(hName.c_str(), hTitle.c_str(), 1500, 0, 300);
 
         hName = "HCalEnergy" + energyStr + "GeV";
         hTitle = "HCal energy";
@@ -626,11 +704,11 @@ void SoftwareCompensation::CreateHistograms()
 
         hName = "TotalEnergy" + energyStr + "GeV";
         hTitle = "Total energy";
-        TH1F *pTotalEnergyHistogram = new TH1F(hName.c_str(), hTitle.c_str(), 600, 0, 120);
+        TH1F *pTotalEnergyHistogram = new TH1F(hName.c_str(), hTitle.c_str(), 3200, 0, 1600);
 
         hName = "CompensatedEnergy" + energyStr + "GeV";
         hTitle = "Compensated energy";
-        TH1F *pSoftCompEnergyHistogram = new TH1F(hName.c_str(), hTitle.c_str(), 600, 0, 120);
+        TH1F *pSoftCompEnergyHistogram = new TH1F(hName.c_str(), hTitle.c_str(), 3200, 0, 1600);
 
         pECalEnergyHistogram->SetDirectory(0); m_hECalEnergyVector.push_back(pECalEnergyHistogram);
         pHCalEnergyHistogram->SetDirectory(0); m_hHCalEnergyVector.push_back(pHCalEnergyHistogram);
@@ -638,12 +716,30 @@ void SoftwareCompensation::CreateHistograms()
         pTotalEnergyHistogram->SetDirectory(0); m_hTotalEnergyVector.push_back(pTotalEnergyHistogram);
         pSoftCompEnergyHistogram->SetDirectory(0); m_hSoftCompEnergyVector.push_back(pSoftCompEnergyHistogram);
     }
+
+    std::string hName2D, hTitle2D;
+    hName2D = "CovarianceMatrix";
+    hTitle2D = "CovarianceMatrix";
+    float limit_parameters_high=(float)m_nMinuitParameters-0.5;
+    m_hSoftCompParamsCovMatrix = new TH2F(hName2D.c_str(), hTitle2D.c_str(), m_nMinuitParameters, -0.5, limit_parameters_high,m_nMinuitParameters, -0.5, limit_parameters_high);
+    hName2D = "CorrelationMatrix";
+    hTitle2D = "CorrelationMatrix";
+    m_hSoftCompParamsCorrMatrix = new TH2F(hName2D.c_str(), hTitle2D.c_str(), m_nMinuitParameters, -0.5, limit_parameters_high,m_nMinuitParameters, -0.5, limit_parameters_high);
+
 }
 
 //------------------------------------------------------------------------------------------------------------------------------------------
 
 void SoftwareCompensation::FillHistograms()
 {
+
+    for(int e1=0;e1<m_covMatrix->GetNcols();e1++){
+     for(int e2=0;e2<m_covMatrix->GetNcols();e2++){
+       m_hSoftCompParamsCovMatrix->SetBinContent(e1+1,e2+1,(*m_covMatrix)(e1,e2));
+       m_hSoftCompParamsCorrMatrix->SetBinContent(e1+1,e2+1,(*m_corrMatrix)(e1,e2));
+     }
+    }
+
     for (unsigned int e = 0 ; e < m_trueEnergies.size() ; e++)
     {
         const std::string energyStr(m_trueEnergies.at(e));
@@ -727,7 +823,8 @@ void SoftwareCompensation::SaveHistograms()
     TCanvas *pHCalHitCanvas        = this->DrawPlots(m_hHCalHitEnergyVector,  pTLegend, "HCal hit energy",             "HCal hit energy [GeV]");
     TCanvas *pTotalEnergyCanvas    = this->DrawPlots(m_hTotalEnergyVector,    pTLegend, "Total energy",                "Reconstructed energy [GeV]");
     TCanvas *pSoftCompEnergyCanvas = this->DrawPlots(m_hSoftCompEnergyVector, pTLegend, "Software compensated energy", "Software compensated energy [GeV]");
-
+    TCanvas *pSoftCompParamsCovMatrixCanvas = this->DrawPlots2D(m_hSoftCompParamsCovMatrix, "CovarianceMatrix", "Parameter");
+    TCanvas *pSoftCompParamsCorrsMatrixCanvas = this->DrawPlots2D(m_hSoftCompParamsCorrMatrix, "CorrelationMatrix", "Parameter");
     //-------------
     // Write output
     TFile *pTFile = new TFile("SoftwareCompensationMonitoring.root", "RECREATE");
@@ -738,6 +835,8 @@ void SoftwareCompensation::SaveHistograms()
     pHCalHitCanvas->Write();
     pTotalEnergyCanvas->Write();
     pSoftCompEnergyCanvas->Write();
+    pSoftCompParamsCovMatrixCanvas->Write();
+    pSoftCompParamsCorrsMatrixCanvas->Write();
     pTFile->Close();
 
     delete pTLegend;
@@ -747,6 +846,8 @@ void SoftwareCompensation::SaveHistograms()
     delete pHCalHitCanvas;
     delete pTotalEnergyCanvas;
     delete pSoftCompEnergyCanvas;
+    delete pSoftCompParamsCovMatrixCanvas;
+    delete pSoftCompParamsCorrsMatrixCanvas;
     delete pTFile;
 }
 
@@ -788,11 +889,29 @@ TCanvas *SoftwareCompensation::DrawPlots(const std::vector<T*> &plots, TLegend *
     return pTCanvas;
 }
 
+
+TCanvas *SoftwareCompensation::DrawPlots2D(TH2F* hist, const std::string &canvasTitle, const std::string &xTitle) const
+{
+    TCanvas *pTCanvas = this->CreateCanvas(canvasTitle);
+    pTCanvas->cd();
+    hist->GetYaxis()->SetTitle(xTitle.c_str());
+    hist->GetXaxis()->SetTitle(xTitle.c_str());
+    const std::string drawOption("colz");
+    hist->Draw("colz");
+    pTCanvas->Update();
+    return pTCanvas;
+}
+
 //------------------------------------------------------------------------------------------------------------------------------------------
 
 void SoftwareCompensation::SetBranchAddresses()
 {
+  
     m_pTChain->SetBranchAddress("FirstPseudoLayer",&m_firstPseudoLayer);
+    m_pTChain->SetBranchAddress("EnergyOfPfo",&m_EnergyOfPfo);
+    m_pTChain->SetBranchAddress("EnergyOfAllPfos",&m_EnergyOfAllPfos);
+    m_pTChain->SetBranchAddress("nAllPfos",& m_nAllPfos);
+    m_pTChain->SetBranchAddress("CosThetaOfPfo",&m_CosThetaOfPfo);
     m_pTChain->SetBranchAddress("RawEnergyOfCluster",&m_rawClusterEnergy);
     m_pTChain->SetBranchAddress("HitEnergies",&m_hitEnergies);
     m_pTChain->SetBranchAddress("CellSize0",&m_cellSize0);
