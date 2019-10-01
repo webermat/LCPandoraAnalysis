@@ -23,3 +23,6 @@ GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+PandoraPFA particle flow pattern recognition algorithms reconstruct particles out of physics digitized energy deposits based on tracks and clusters in calorimeters. These classes calibrate the response of these particles. SoftwareCompensation reweights the energy deposits of the calorimeter, based on the energy density of a shower, which is found in a regression step using chi2 minimisation of the total cluster energies.
+Here parameters for MuonChamber response and software compensation have been adapted to conditions as they will be present at the CLIC detector.
